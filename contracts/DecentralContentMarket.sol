@@ -8,6 +8,7 @@ import "@openzeppelin/contracts/token/ERC721/extensions/ERC721Enumerable.sol";
 
 import "./content/Catalogue.sol";
 import "./DecentralToken.sol";
+
 // NFTS
 // ERC20 for reward
 // DAO
@@ -34,9 +35,11 @@ contract DecentralContentMarket is Ownable, IERC721Receiver {
         address  owner;
         CATEGORY category;
         MEDIA    media;
-        uint48   accuralTimestamp;
-        uint48   playedCount;
-        bool     isListed;  
+        uint48   accuralPlayedCount;
+        uint48   totalPlayedCount;
+        bool     isListedAsContent;  
+        bool     isOnSale;
+        uint256  price ether;
     }
 
     event NftListed(uint256 indexed tokenId, CATEGORY indexed category, MEDIA indexed media, address owner);
@@ -51,6 +54,10 @@ contract DecentralContentMarket is Ownable, IERC721Receiver {
     DecentralToken private s_token;
 
     address payable private s_owner;
+
+    // pay per play should be based on Media type
+    // Based on director value, A DAO decided rate
+    uint256 private constant c_payPerPlay = 10 ether;
     
     constructor(NFTCollection _nft, DecentralToken _token){
         s_nft = _nft;
@@ -60,18 +67,18 @@ contract DecentralContentMarket is Ownable, IERC721Receiver {
     function createNft(string memory tokenURI, uint256 price, CATEGORY category, MEDIA media) public payable returns(uint256){
         require( price > 0," List with price greater than 0");
         uint256 tokenId = s_nft.mintToken(tokenURI);    
-        NFTItem storage item = NFTItem(tokenId, block.timestamp, msg.sender,category,media,0,0,false);
+        NFTItem storage item = NFTItem(tokenId, block.timestamp, msg.sender,category,media,0,0,false,false,price);
         s_listing.push(item);
         s_idToListing[tokenId] = item;
-        s_ownerToListing[msg.sender][tokenId] = item;
+        s_ownerToListing[msg.sender].push(item);
     }
 
-    function listNft(uint256 tokenId) public payable{
-        require(s_idToListing[tokenId].owner === msg.sender, "Only owner of the NFT can list.");       
+    function listNftAsDecentralizedContent(uint256 tokenId) public payable{
+        require(s_idToListing[tokenId].owner === msg.sender, "Only owner of the NFT can list as Decentralized Content.");       
   
         NFTItem storage item = s_idToListing[tokenId]
 
-        item.isListed = true;
+        item.isListedAsContent = true;
         item.accuralTimestamp = block.timestamp;
 
         // Transfer the ownership to smart contract and lock it.
@@ -79,7 +86,44 @@ contract DecentralContentMarket is Ownable, IERC721Receiver {
         s_listedtokenIds.increment();
     }
 
-     function getListedNFTs() public view returns(NFTItem[] memory){
+    function DelistNftAsDecentralizedContent(uint256 tokenId) public payable{
+        require(s_idToListing[tokenId].owner == msg.sender, "Only owner of the NFT can list as Decentralized Content.");       
+        require(s_idToListing[tokenId].isListedAsContent == false, "Your NFT is not listed as Decentralized Content.");  
+
+        NFTItem storage item = s_idToListing[tokenId]
+
+        item.isListedAsContent = false;
+
+        // Calculate Rewards if earned.
+
+        // Transfer the ownership to smart contract and lock it.
+        _transfer(address(this),msg.sender, tokenId);
+    }
+
+    function listNftForSale(uint256 tokenId) public payable{
+        require(s_idToListing[tokenId].owner == msg.sender, "Only owner of the NFT can list for Sale.");    
+        require(s_idToListing[tokenId].isListedAsContent == false, "Should not be lised as Decentralized Content.");    
+
+        NFTItem storage item = s_idToListing[tokenId]
+
+        item.isOnSale = true;
+        item.accuralTimestamp = 0;
+    }
+
+    function executeBuy(uint256 tokenId) public payable{
+        require(s_idToListing[tokenId].isOnSale == true,"NFT is not on sale");
+        require(s_idToListing[tokenId].price ether == msg.value ether,"Insufficient funds"); 
+
+        NFTItem storage item = s_idToListing[tokenId];
+
+        token.transfer(item.owner, msg.value);       
+
+        nft.transfer(item.owner, msg.sender, tokenId);
+
+        item.owner = msg.sender;
+    }
+
+    function getListedNFTs() public view returns(NFTItem[] memory){
         // Number of items that are listed
         uint listedNftCount = s_listedtokenIds.current();
         NFTItem[] memory tokens = new NFTItem[](listedNftCount);
@@ -120,39 +164,36 @@ contract DecentralContentMarket is Ownable, IERC721Receiver {
 
         NFTItem storage nftItem = s_idToListing[tokenId];
         // Record play
-        nftItem.playedCount = nftItem.playedCount + 1;
+        nftItem.accuralPlayedCount = nftItem.accuralPlayedCount + 1;
+        nftItem.totalPlayedCount = nftItem.totalPlayedCount + 1;
     }
       
-    function earningInfo() external view returns(uint256 earnings){ 
-         uint256 tokenId;
+    function earnings() public view returns(uint256 earnings){ 
          uint256 earned = 0;
+         NFTItem[] memory nftItems = s_ownerToListing[msg.sender];
 
-         for(uint i =0; i< tokenIds.length; i++){
-          tokenId = tokenIds[i];
-          Stake memory staked = vault[tokenId];
-          require(staked.owner == account, "not an owner");
-          uint256 stakedAt = staked.timestamp;
-          earned += c_dailyRewards * (block.timestamp - stakedAt)/ 1 days;
-          vault[tokenId] = Stake({
-            owner: account,
-            tokenId: uint24(tokenId),
-            timestamp:uint48(block.timestamp)
-          });
+         for(uint i =0; i< nftItems.length; i++){
+          NFTItem nftItem = nftItems[i];
+          earned += (c_payPerPlay * nftItem.accuralPlayedCount);
          }
-
-         if(earned > 0){
-          earned = earned / c_dailyRewards;
-          token.mint(account, earned);
-         }
-
-         if(_unstake){
-           unstakeMany(account, tokenIds);
-         }
-         emit Claimed(account, earned);
+         return earned;
     }
 
-    function withdrawEarnings(){
+    function withdrawEarnings() public payable {
+         uint256 earned = 0;
+         NFTItem[] memory nftItems = s_ownerToListing[msg.sender];
 
+         for(uint i =0; i< nftItems.length; i++){
+          NFTItem nftItem = nftItems[i];
+          earned += (c_payPerPlay * nftItem.accuralPlayedCount);
+         }
+
+         require(earned > 0,"No earns to withdraw");
+
+         if(earned > 0){
+           // transfer the funds to Owner 
+           token.mint(msg.sender, earned);
+         }
     }
 
     function onERC721Received(
